@@ -130,12 +130,24 @@ export async function simulateHealthFactor(loanId: string): Promise<number | nul
  * flag those below CRIT threshold, and fire configurable warning/critical alerts with per-loan cooldown.
  * @returns The number of loan records updated.
  */
-export async function runHealthFactorJob(): Promise<number> {
+export interface HealthFactorEvaluation {
+  updated: number;
+  candidates: Array<LoanRecord & { health_factor: number }>;
+}
+
+/**
+ * Evaluate all active loans using the same on-chain health-factor lookup as the
+ * scheduled job. Updates are optional so administrative dry-runs are read-only.
+ */
+export async function evaluateHealthFactors(options: {
+  applyUpdates?: boolean;
+} = {}): Promise<HealthFactorEvaluation> {
   const start = Date.now();
   logger.info("healthFactorJob: starting");
 
   const loans = listActiveLoans();
   let updated = 0;
+  const candidates: Array<LoanRecord & { health_factor: number }> = [];
 
   for (const loan of loans) {
     let hf: number | null = null;
@@ -161,7 +173,11 @@ export async function runHealthFactorJob(): Promise<number> {
 
     const newStatus = hf < SCALE ? "at_risk" : "active";
 
-    if (loan.health_factor !== hf || loan.status !== newStatus) {
+    if (hf < SCALE) {
+      candidates.push({ ...loan, health_factor: hf, status: newStatus });
+    }
+
+    if (options.applyUpdates !== false && (loan.health_factor !== hf || loan.status !== newStatus)) {
       updateLoan(loan.id, { health_factor: hf, status: newStatus });
       updated++;
     }
@@ -176,7 +192,12 @@ export async function runHealthFactorJob(): Promise<number> {
 
   const duration = Date.now() - start;
   logger.info("healthFactorJob: completed", { duration_ms: duration, updated });
-  return updated;
+  return { updated, candidates };
+}
+
+export async function runHealthFactorJob(): Promise<number> {
+  const result = await evaluateHealthFactors();
+  return result.updated;
 }
 
 /**
