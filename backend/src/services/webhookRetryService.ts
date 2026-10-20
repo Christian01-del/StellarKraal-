@@ -10,6 +10,7 @@
  *   Attempt 6+ → permanent failure
  *
  * Closes #1071
+ * Closes #1387
  */
 
 import { randomUUID } from "crypto";
@@ -37,6 +38,22 @@ export interface WebhookDelivery {
   updatedAt: Date;
 }
 
+/**
+ * A delivery that exhausted all retries and was moved to the dead-letter store.
+ * Mirrors the `dead_letter_webhooks` table.
+ */
+export interface DeadLetterWebhook {
+  id: string;
+  deliveryId: string;
+  webhookId: string;
+  url: string;
+  payload: object;
+  attempts: WebhookDeliveryAttempt[];
+  lastError: string | null;
+  replayedAt: Date | null;
+  createdAt: Date;
+}
+
 export interface WebhookRetryServiceOptions {
   /** Maximum number of delivery attempts (default: 5). */
   maxAttempts?: number;
@@ -51,6 +68,9 @@ export interface WebhookRetryServiceOptions {
  * The in-memory store is reset between test runs via `__resetForTests`.
  */
 const inMemoryStore = new Map<string, WebhookDelivery>();
+
+/** In-memory dead-letter store (mirrors the `dead_letter_webhooks` table). */
+const deadLetterStore = new Map<string, DeadLetterWebhook>();
 
 export class WebhookRetryService {
   private readonly maxAttempts: number;
@@ -176,6 +196,8 @@ export class WebhookRetryService {
         body: JSON.stringify(delivery.payload),
       });
 
+      responseCode = response.status;
+
       if (response.ok) {
         succeeded = true;
         delivery.status = "success";
@@ -186,7 +208,26 @@ export class WebhookRetryService {
         delivery.lastError = `HTTP ${response.status}: ${response.statusText}`;
       }
     } catch (err: unknown) {
-      delivery.lastError = err instanceof Error ? err.message : String(err);
+      attemptError = err instanceof Error ? err.message : String(err);
+    }
+
+    const latencyMs = Date.now() - startedAt;
+
+    delivery.attempts.push({
+      attemptNumber: delivery.attemptNumber,
+      status: succeeded ? "success" : "failed",
+      responseCode,
+      latencyMs,
+      error: attemptError,
+      attemptedAt: now,
+    });
+
+    if (succeeded) {
+      delivery.status = "success";
+      delivery.lastError = null;
+      delivery.nextRetryAt = null;
+      inMemoryStore.set(deliveryId, delivery);
+      return delivery;
     }
 
     if (succeeded) {
@@ -225,10 +266,60 @@ export class WebhookRetryService {
       });
       delivery.status = "failed";
       delivery.nextRetryAt = null;
+      this.moveToDeadLetter(delivery);
     }
 
     inMemoryStore.set(deliveryId, delivery);
     return delivery;
+  }
+
+  /**
+   * Write an exhausted delivery into the dead-letter store.
+   */
+  private moveToDeadLetter(delivery: WebhookDelivery): DeadLetterWebhook {
+    const entry: DeadLetterWebhook = {
+      id: randomUUID(),
+      deliveryId: delivery.id,
+      webhookId: delivery.webhookId,
+      url: delivery.url,
+      payload: delivery.payload,
+      attempts: delivery.attempts,
+      lastError: delivery.lastError,
+      replayedAt: null,
+      createdAt: new Date(),
+    };
+    deadLetterStore.set(entry.id, entry);
+    return entry;
+  }
+
+  /**
+   * List all dead-letter entries (admin inspection).
+   *
+   * @returns Array of {@link DeadLetterWebhook} records ordered by creation time (newest first).
+   */
+  async listDeadLetters(): Promise<DeadLetterWebhook[]> {
+    return Array.from(deadLetterStore.values()).sort(
+      (a, b) => b.createdAt.getTime() - a.createdAt.getTime()
+    );
+  }
+
+  /**
+   * Replay a dead-letter entry by scheduling a fresh delivery for its payload.
+   *
+   * @param deadLetterId - ID of the dead-letter entry to replay.
+   * @returns The newly scheduled {@link WebhookDelivery} record.
+   * @throws Error if the dead-letter entry is not found.
+   */
+  async replayDeadLetter(deadLetterId: string): Promise<WebhookDelivery> {
+    const entry = deadLetterStore.get(deadLetterId);
+    if (!entry) {
+      throw new Error(`Dead-letter entry ${deadLetterId} not found`);
+    }
+
+    entry.replayedAt = new Date();
+    deadLetterStore.set(deadLetterId, entry);
+
+    return this.scheduleRetry(entry.webhookId, entry.url, entry.payload, 1);
   }
 
   /**
@@ -262,10 +353,11 @@ export class WebhookRetryService {
   }
 
   /**
-   * Reset the in-memory store — **only for use in unit tests**.
+   * Reset the in-memory stores — **only for use in unit tests**.
    */
   __resetForTests(): void {
     inMemoryStore.clear();
+    deadLetterStore.clear();
   }
 }
 
