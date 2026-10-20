@@ -9,13 +9,18 @@ interface Props {
 }
 
 /**
- * WalletConnect — #808
+ * WalletConnect — #808 / #1369
  *
  * Renders one of four visually-distinct states:
- *   connecting   → spinner + "Connecting…" (button disabled)
- *   connected    → green dot + truncated address + Disconnect button
+ *   connecting   → spinner + descriptive "awaiting approval" text (button disabled)
+ *   connected    → green dot + truncated address + copy button + Disconnect button
  *   error        → red dot + "Connect Failed" + retry button
  *   disconnected → default "Connect Wallet" CTA
+ *
+ * #1369: clearer status feedback — descriptive loading text while awaiting
+ * wallet approval, an install prompt with a direct link when Freighter is
+ * missing, an actionable message on Stellar network mismatch, and a
+ * copy-to-clipboard button next to the truncated connected address.
  *
  * All state transitions animate with a 150 ms fade via the `wc-fade`
  * CSS animation defined in globals.css. The component is keyboard-navigable
@@ -32,10 +37,17 @@ export default function WalletConnect({ onConnect }: Props) {
   const { address, freighterInstalled, connecting, error, connect, disconnect } =
     useWallet();
   const [confirmDisconnectOpen, setConfirmDisconnectOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     if (address) onConnect(address);
   }, [address, onConnect]);
+
+  useEffect(() => {
+    if (!copied) return;
+    const t = setTimeout(() => setCopied(false), 2000);
+    return () => clearTimeout(t);
+  }, [copied]);
 
   function handleConfirmDisconnect() {
     disconnect();
@@ -43,6 +55,15 @@ export default function WalletConnect({ onConnect }: Props) {
     // #1356: redirect unauthenticated users after wallet state is cleared.
     if (typeof window !== "undefined") {
       window.location.assign("/");
+    }
+  }
+
+  async function handleCopy(address: string) {
+    try {
+      await navigator.clipboard.writeText(address);
+      setCopied(true);
+    } catch {
+      // Clipboard unavailable — silently ignore; address remains visible.
     }
   }
 
@@ -65,7 +86,7 @@ export default function WalletConnect({ onConnect }: Props) {
           interact on-chain.
         </p>
         <a
-          href="https://freighter.app"
+          href="https://www.freighter.app/"
           target="_blank"
           rel="noopener noreferrer"
           className="text-[color:var(--token-accent)] underline hover:opacity-80 transition-opacity"
@@ -97,6 +118,17 @@ export default function WalletConnect({ onConnect }: Props) {
             <span className="font-mono text-[color:var(--token-success)] truncate font-semibold">
               {truncated}
             </span>
+            <button
+              onClick={() => handleCopy(address)}
+              className="flex-shrink-0 rounded-md border border-[color:var(--token-border-strong)]
+                bg-transparent px-2 py-1 text-xs font-semibold text-[color:var(--token-text-subtle)]
+                transition-colors hover:bg-[color:var(--token-surface-raised)]
+                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--token-accent)]
+                focus-visible:ring-offset-1"
+              aria-label={copied ? "Address copied" : "Copy wallet address"}
+            >
+              {copied ? "Copied" : "Copy"}
+            </button>
           </div>
           <button
             onClick={() => setConfirmDisconnectOpen(true)}
@@ -130,7 +162,7 @@ export default function WalletConnect({ onConnect }: Props) {
   // ── Connecting ───────────────────────────────────────────────────────────
   if (connecting) {
     return (
-      <div className="mb-6">
+      <div className="mb-6" role="status" aria-live="polite">
         <button
           data-onboarding-target="wallet"
           disabled
@@ -144,12 +176,16 @@ export default function WalletConnect({ onConnect }: Props) {
           <Spinner className="h-4 w-4" label="Connecting" />
           Connecting…
         </button>
+        <p className="mt-2 text-xs text-[color:var(--token-text-muted)]">
+          Approve the connection request in your Freighter wallet to continue.
+        </p>
       </div>
     );
   }
 
   // ── Error ────────────────────────────────────────────────────────────────
   if (error) {
+    const isNetworkMismatch = /network/i.test(error);
     return (
       <div className="mb-6" role="alert" aria-live="assertive" data-onboarding-target="wallet">
         <div
@@ -163,12 +199,17 @@ export default function WalletConnect({ onConnect }: Props) {
             aria-hidden="true"
           />
           <span className="font-semibold text-[color:var(--token-danger)]">
-            Connect Failed
+            {isNetworkMismatch ? "Wrong Network" : "Connect Failed"}
           </span>
           <span className="text-[color:var(--token-text-muted)] ml-1 truncate text-xs">
             — {error}
           </span>
         </div>
+        {isNetworkMismatch && (
+          <p className="mb-2 text-xs text-[color:var(--token-text-muted)]">
+            Open Freighter, switch to the correct Stellar network, then retry.
+          </p>
+        )}
         <button
           onClick={connect}
           className="wc-fade inline-flex items-center gap-2 rounded-xl
