@@ -99,6 +99,17 @@ admin may patch it; other callers receive `403 Forbidden`.
 | GET | `/loans` | List loans (paginated) |
 | GET | `/loans/summary` | Get borrower loan portfolio summary |
 
+### Idempotency (`Idempotency-Key`)
+
+`POST /loan/repay` (and the versioned alias `POST /api/v1/loans/{id}/repay`)
+accepts an optional `Idempotency-Key` request header. When supplied, the server
+records the response for that key and replays it on any subsequent request that
+reuses the same key, preventing duplicate repayments caused by network retries.
+
+| Header | Required | Description |
+|--------|----------|-------------|
+| `Idempotency-Key` | No | Client-generated unique key (e.g. a UUID). Reusing a key returns the cached response (original status code) instead of creating a new repayment. Keys expire after 24 hours. |
+
 ## Oracle (`oracle`)
 
 | Method | Path | Summary |
